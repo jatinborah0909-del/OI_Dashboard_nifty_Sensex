@@ -571,9 +571,23 @@ function setIndex(idx, el) {
   el.classList.add('active');
   document.title = (idx === 'sensex' ? 'Sensex' : 'Nifty') + ' OI Bias Monitor';
   document.querySelector('h1').textContent = (idx === 'sensex' ? 'Sensex' : 'Nifty') + ' OI Bias Monitor';
-  // reset state
-  minuteRows = []; biasStreak = []; currentBias = null;
-  liveCandle = null; latestCandles = [];
+  // Reset ALL strike + chart state so new index populates fresh
+  allStrikes    = [];       // key fix — allows fetchOI to re-populate strikes
+  atmStrike     = null;
+  defaultBear   = null;
+  defaultBull   = null;
+  selectedBear  = null;
+  selectedBull  = null;
+  lastOIData    = null;
+  minuteRows    = [];
+  biasStreak    = [];
+  currentBias   = null;
+  liveCandle    = null;
+  latestCandles = [];
+  // Clear UI immediately so stale strikes don't show
+  document.getElementById('strike-chips').innerHTML = '';
+  document.getElementById('bear-select').innerHTML  = '<option>—</option>';
+  document.getElementById('bull-select').innerHTML  = '<option>—</option>';
   fetchOI().then(() => fetchHistory());
   fetchLTP();
   fetchLiveCandle();
