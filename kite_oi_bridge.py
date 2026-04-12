@@ -65,7 +65,8 @@ SENSEX_STRIKE_STEP = 100
 SENSEX_ROLL_THR    = 200
 SENSEX_DB_TABLE    = "sensex_oi_history"
 
-NUM_STRIKES       = 11          # ATM ± 5 for each index
+NIFTY_NUM_STRIKES  = 11          # ATM ± 5  → 11 strikes × 2 = 22 tokens
+SENSEX_NUM_STRIKES = 41          # ATM ± 20 → 41 strikes × 2 = 82 tokens
 OI_HISTORY_MAXLEN = 500
 
 
@@ -195,12 +196,14 @@ INDEX_CFG = {
         "state": nifty_state, "buf": nifty_buf,
         "table": NIFTY_DB_TABLE, "mem": nifty_mem,
         "strike_step": NIFTY_STRIKE_STEP, "roll_thr": NIFTY_ROLL_THR,
+        "num_strikes": NIFTY_NUM_STRIKES,
         "name": "nifty",
     },
     SENSEX_SPOT_TOKEN: {
         "state": sensex_state, "buf": sensex_buf,
         "table": SENSEX_DB_TABLE, "mem": sensex_mem,
         "strike_step": SENSEX_STRIKE_STEP, "roll_thr": SENSEX_ROLL_THR,
+        "num_strikes": SENSEX_NUM_STRIKES,
         "name": "sensex",
     },
 }
@@ -215,9 +218,9 @@ def round_to_nearest(price, step):
     return round(price / step) * step
 
 
-def compute_strikes_window(atm, step):
-    half = NUM_STRIKES // 2
-    return [atm + (i - half) * step for i in range(NUM_STRIKES)]
+def compute_strikes_window(atm, step, num_strikes):
+    half = num_strikes // 2
+    return [atm + (i - half) * step for i in range(num_strikes)]
 
 
 def compute_bear_bull(spot, step):
@@ -495,7 +498,7 @@ def build_ticker():
 
 # ── STARTUP ───────────────────────────────────────────────────────────────────
 
-def initialise_index(spot_token, spot_symbol, exchange, name, strike_step, roll_thr, st):
+def initialise_index(spot_token, spot_symbol, exchange, name, strike_step, roll_thr, num_strikes, st):
     """Fetch live spot, compute window, find instruments, populate state."""
     print(f"\n{'─'*50}")
     print(f"Initialising {name} ...")
@@ -503,7 +506,7 @@ def initialise_index(spot_token, spot_symbol, exchange, name, strike_step, roll_
     print(f"  Live spot: {seed_spot:,.2f}")
 
     atm     = round_to_nearest(seed_spot, strike_step)
-    strikes = compute_strikes_window(atm, strike_step)
+    strikes = compute_strikes_window(atm, strike_step, num_strikes)
     bear, bull = compute_bear_bull(seed_spot, strike_step)
     bear = max(min(strikes), min(bear, max(strikes)))
     bull = max(min(strikes), min(bull, max(strikes)))
@@ -543,12 +546,14 @@ def initialise_all():
         NIFTY_SPOT_TOKEN, NIFTY_SPOT_SYMBOL,
         NIFTY_EXCHANGE, NIFTY_NAME,
         NIFTY_STRIKE_STEP, NIFTY_ROLL_THR,
+        NIFTY_NUM_STRIKES,
         nifty_state,
     )
     initialise_index(
         SENSEX_SPOT_TOKEN, SENSEX_SPOT_SYMBOL,
         SENSEX_EXCHANGE, SENSEX_NAME,
         SENSEX_STRIKE_STEP, SENSEX_ROLL_THR,
+        SENSEX_NUM_STRIKES,
         sensex_state,
     )
     build_ticker()
