@@ -1,10 +1,8 @@
 """
-Nifty + Sensex OI Bias Monitor — Railway Bridge
+Sensex OI Bias Monitor — Railway Bridge
 ================================================
-Tracks BOTH Nifty (NSE) and Sensex (BSE) simultaneously.
-Each index has its own state, minute buffer, and DB table:
-    nifty_oi_history   — Nifty 1-min candle rows
-    sensex_oi_history  — Sensex 1-min candle rows
+Tracks Sensex (BSE) only.
+Data stored in: sensex_oi_history
 
 Railway setup
 ─────────────
@@ -22,8 +20,7 @@ Endpoints:
     GET  /oi/live-candle?index=nifty  forming candle
     GET  /strikes?index=nifty     strike list
     GET  /health                  both indices status
-    POST /reset-csv?index=nifty   wipe today's rows for one index
-    POST /reset-csv?index=all     wipe today's rows for both indices
+    POST /reset-csv               wipe today's sensex rows
 """
 
 import collections
@@ -31,7 +28,13 @@ import json
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
+def now_ist():
+    return datetime.now(IST)
+def ts_to_ist(ts):
+    return datetime.fromtimestamp(ts, tz=IST)
 
 import psycopg2
 import psycopg2.extras
@@ -89,21 +92,22 @@ def init_db():
     """Create both OI history tables if they don't exist."""
     with get_db() as conn:
         with conn.cursor() as cur:
-            for table in (NIFTY_DB_TABLE, SENSEX_DB_TABLE):
-                cur.execute(f"""
-                    CREATE TABLE IF NOT EXISTS {table} (
-                        id          SERIAL PRIMARY KEY,
-                        ts          DOUBLE PRECISION NOT NULL,
-                        time_label  TEXT,
-                        session_id  INTEGER,
-                        trade_date  DATE DEFAULT CURRENT_DATE,
-                        data        JSONB NOT NULL
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_{table}_date
-                        ON {table} (trade_date);
-                """)
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {SENSEX_DB_TABLE} (
+                    id          SERIAL PRIMARY KEY,
+                    ts          DOUBLE PRECISION NOT NULL,
+                    time_label  TEXT,
+                    session_id  INTEGER,
+                    trade_date  DATE DEFAULT CURRENT_DATE,
+                    data        JSONB NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sensex_date
+                    ON {SENSEX_DB_TABLE} (trade_date);
+                """
+            )
         conn.commit()
-    print(f"DB initialised — tables {NIFTY_DB_TABLE}, {SENSEX_DB_TABLE} ready.")
+    print(f"DB initialised — table {SENSEX_DB_TABLE} ready.")
 
 
 def db_write_row(table: str, row: dict):
@@ -178,27 +182,13 @@ def make_buffer():
 
 # ── GLOBAL STATE ──────────────────────────────────────────────────────────────
 
-nifty_state  = make_state()
 sensex_state = make_state()
-
-nifty_buf    = make_buffer()
 sensex_buf   = make_buffer()
-
-# in-memory fallback deques (used if DB is temporarily unavailable)
-nifty_mem    = collections.deque(maxlen=OI_HISTORY_MAXLEN)
 sensex_mem   = collections.deque(maxlen=OI_HISTORY_MAXLEN)
-
 state_lock   = threading.Lock()
 
-# quick lookup: spot token → (state, buffer, db_table, mem_deque, cfg)
+# Sensex only
 INDEX_CFG = {
-    NIFTY_SPOT_TOKEN: {
-        "state": nifty_state, "buf": nifty_buf,
-        "table": NIFTY_DB_TABLE, "mem": nifty_mem,
-        "strike_step": NIFTY_STRIKE_STEP, "roll_thr": NIFTY_ROLL_THR,
-        "num_strikes": NIFTY_NUM_STRIKES,
-        "name": "nifty",
-    },
     SENSEX_SPOT_TOKEN: {
         "state": sensex_state, "buf": sensex_buf,
         "table": SENSEX_DB_TABLE, "mem": sensex_mem,
@@ -314,7 +304,7 @@ def _append_history(st, buf, table, mem):
 
     row = {
         "ts":          buf["start_ts"],
-        "time_label":  datetime.fromtimestamp(buf["start_ts"]).strftime("%H:%M"),
+        "time_label":  ts_to_ist(buf["start_ts"]).strftime("%H:%M"),
         "session_id":  st["session_id"],
         "bear_strike": st["bear_strike"],
         "bull_strike": st["bull_strike"],
@@ -394,7 +384,7 @@ def _check_roll(st, new_spot, strike_step, roll_thr):
     st["bull_strike"]   = bull
     st["last_anchored"] = new_spot
     st["roll_log"].append({
-        "time":       datetime.now().strftime("%H:%M:%S"),
+        "time":       now_ist().strftime("%H:%M:%S"),
         "session_id": st["session_id"],
         "from_spot":  round(new_spot),
         "from_bear":  prev_bear,
@@ -469,17 +459,10 @@ def build_ticker():
 
     def on_connect(ws, response):
         with state_lock:
-            all_tokens = (
-                list(INDEX_CFG.keys())                    # both spot tokens
-                + list(nifty_state["tokens"].keys())      # nifty options
-                + list(sensex_state["tokens"].keys())     # sensex options
-            )
+            all_tokens = [SENSEX_SPOT_TOKEN] + list(sensex_state["tokens"].keys())
         ws.subscribe(all_tokens)
         ws.set_mode(ws.MODE_FULL, all_tokens)
-        print(
-            f"Subscribed: {len(all_tokens)} tokens total "
-            f"(2 spot + {len(nifty_state['tokens'])} nifty + {len(sensex_state['tokens'])} sensex)"
-        )
+        print(f"Subscribed: {len(all_tokens)} tokens (1 spot + {len(sensex_state['tokens'])} sensex options)")
 
     def on_error(ws, code, reason):
         print(f"Ticker error {code}: {reason}")
@@ -543,13 +526,6 @@ def initialise_index(spot_token, spot_symbol, exchange, name, strike_step, roll_
 
 def initialise_all():
     initialise_index(
-        NIFTY_SPOT_TOKEN, NIFTY_SPOT_SYMBOL,
-        NIFTY_EXCHANGE, NIFTY_NAME,
-        NIFTY_STRIKE_STEP, NIFTY_ROLL_THR,
-        NIFTY_NUM_STRIKES,
-        nifty_state,
-    )
-    initialise_index(
         SENSEX_SPOT_TOKEN, SENSEX_SPOT_SYMBOL,
         SENSEX_EXCHANGE, SENSEX_NAME,
         SENSEX_STRIKE_STEP, SENSEX_ROLL_THR,
@@ -562,11 +538,8 @@ def initialise_all():
 # ── HELPERS FOR ENDPOINTS ─────────────────────────────────────────────────────
 
 def _resolve_index(req):
-    """Return (state, buf, table, mem) for ?index= param. Defaults to nifty."""
-    idx = req.args.get("index", "nifty").lower()
-    if idx == "sensex":
-        return sensex_state, sensex_buf, SENSEX_DB_TABLE, sensex_mem
-    return nifty_state, nifty_buf, NIFTY_DB_TABLE, nifty_mem
+    """Always returns Sensex — only index tracked."""
+    return sensex_state, sensex_buf, SENSEX_DB_TABLE, sensex_mem
 
 
 # ── API ENDPOINTS ─────────────────────────────────────────────────────────────
@@ -588,7 +561,7 @@ def get_oi():
             "bull_strike": st["bull_strike"],
             "strikes":     st["strikes"],
             "roll_log":    list(st["roll_log"]),
-            "as_of":       datetime.now().strftime("%H:%M:%S"),
+            "as_of":       now_ist().strftime("%H:%M:%S"),
             "options":     {},
         }
         for token, meta in st["tokens"].items():
@@ -668,7 +641,7 @@ def live_candle():
         result = {
             "available":   True,
             "elapsed_sec": elapsed,
-            "time_label":  datetime.fromtimestamp(buf["start_ts"]).strftime("%H:%M") + "*",
+            "time_label":  ts_to_ist(buf["start_ts"]).strftime("%H:%M") + "*",
             "spot_open":   round(buf["spot_open"])  if buf["spot_open"]  else 0,
             "spot_high":   round(buf["spot_high"])  if buf["spot_high"]  else 0,
             "spot_low":    round(buf["spot_low"])   if buf["spot_low"]   else 0,
@@ -707,16 +680,13 @@ def health():
                 },
             }
         return jsonify({
-            "status":  "ok",
-            "nifty":   _snap(nifty_state,  nifty_buf),
-            "sensex":  _snap(sensex_state, sensex_buf),
+            "status": "ok",
+            "sensex": _snap(sensex_state, sensex_buf),
         })
 
 
 @app.route("/reset-csv", methods=["POST"])
 def reset_csv():
-    idx = request.args.get("index", "nifty").lower()
-
     def _reset(st, buf, table, mem):
         db_reset_today(table)
         mem.clear()
@@ -731,16 +701,8 @@ def reset_csv():
             buf["ltp_ohlc"]   = {}
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {table} reset.")
 
-    if idx == "all":
-        _reset(nifty_state,  nifty_buf,  NIFTY_DB_TABLE,  nifty_mem)
-        _reset(sensex_state, sensex_buf, SENSEX_DB_TABLE, sensex_mem)
-        msg = "Both nifty_oi_history and sensex_oi_history cleared."
-    elif idx == "sensex":
-        _reset(sensex_state, sensex_buf, SENSEX_DB_TABLE, sensex_mem)
-        msg = "sensex_oi_history cleared."
-    else:
-        _reset(nifty_state, nifty_buf, NIFTY_DB_TABLE, nifty_mem)
-        msg = "nifty_oi_history cleared."
+    _reset(sensex_state, sensex_buf, SENSEX_DB_TABLE, sensex_mem)
+    msg = "sensex_oi_history cleared."
 
     return jsonify({"status": "ok", "message": msg})
 
@@ -749,7 +711,7 @@ def reset_csv():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Nifty + Sensex OI Monitor — Railway Bridge")
+    print("Sensex OI Monitor — Railway Bridge")
     print("=" * 60)
 
     print("\nInitialising database tables...")
@@ -766,7 +728,7 @@ if __name__ == "__main__":
     print(f"  GET  /oi/live-candle?index=... forming candle")
     print(f"  GET  /strikes?index=...        strike list")
     print(f"  GET  /health                   both indices status")
-    print(f"  POST /reset-csv?index=nifty|sensex|all")
+    print(f"  POST /reset-csv                wipe today sensex rows")
     print("\nPress Ctrl+C to stop.\n")
 
     app.run(host="0.0.0.0", port=FLASK_PORT, debug=False, use_reloader=False)
